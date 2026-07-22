@@ -19,7 +19,7 @@ class _HomePageState extends State<HomePage> {
   
   bool isRecording = false;
   bool isAnalyzing = false;
-  String resultText = "请选择一个音阶，点击麦克风按钮开始录一段声音";
+  String resultText = "点击麦克风按钮开始录一段声音";
 
   // A Major Scale A4 to A5
   final List<Map<String, dynamic>> _aMajorScale = [

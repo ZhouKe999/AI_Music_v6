@@ -7,7 +7,7 @@ import 'package:http/http.dart' as http;
 import '../utils/yin.dart';
 
 class PitchService {
-  static const String _analysisEndpoint = 'http://10.0.2.2:8000/analyze';
+  static const String _analysisEndpoint = 'http://192.168.2.198:8000/analyze';
   static const int _frameSize = 2048;
   static const int _hopSize = 512;
   static const Duration _requestTimeout = Duration(seconds: 60);
@@ -24,17 +24,17 @@ class PitchService {
   ];
 
   final int sampleRate = 44100;
-  
+
   // Python script parameters
   // 调整这里的 rmsThreshold（能量阈值）可以控制收音灵敏度
   // 因为底噪问题，先调回稍微高一点的值，避免纯噪音被当做信号
-  final double rmsThreshold = 0.0001; 
+  final double rmsThreshold = 0.0001;
   final double freqJumpThreshold = 50.0;
-  
+
   // Target variables
   String targetNoteName = "B4";
-  double targetMidi = 71.0; 
-  double targetFreq = 493.88; 
+  double targetMidi = 71.0;
+  double targetFreq = 493.88;
   final double errorCents = 15.0;
 
   void setTargetNote(String noteName, double midi, double freq) {
@@ -51,12 +51,14 @@ class PitchService {
   Future<List<double>> decodeWavToFloatBuffer(String filePath) async {
     final file = File(filePath);
     if (!await file.exists()) {
-      throw const PitchAnalysisException('找不到录音文件。');
+      throw const PitchAnalysisException('Recording file not found.');
     }
 
     final bytes = await file.readAsBytes();
     if (bytes.length < 44) {
-      throw const PitchAnalysisException('录音文件为空或不是有效的 WAV 文件。');
+      throw const PitchAnalysisException(
+        'Recording is empty or is not a valid WAV file.',
+      );
     }
 
     final byteData = ByteData.sublistView(bytes);
@@ -68,7 +70,7 @@ class PitchService {
       final chunkSize = byteData.getUint32(chunkOffset + 4, Endian.little);
       final chunkDataOffset = chunkOffset + 8;
       if (chunkDataOffset + chunkSize > bytes.length) {
-        throw const PitchAnalysisException('WAV 文件的数据块不完整。');
+        throw const PitchAnalysisException('WAV data chunk is incomplete.');
       }
 
       if (bytes[chunkOffset] == 100 &&
@@ -84,7 +86,9 @@ class PitchService {
     }
 
     if (dataOffset == null || dataLength == null) {
-      throw const PitchAnalysisException('WAV 文件中找不到 PCM 数据。');
+      throw const PitchAnalysisException(
+        'PCM data was not found in the WAV file.',
+      );
     }
 
     final dataEnd = dataOffset + dataLength;
@@ -105,7 +109,11 @@ class PitchService {
     final yin = Yin(sampleRate, _frameSize);
     final validPitches = <double>[];
 
-    for (var offset = 0; offset <= samples.length - _frameSize; offset += _hopSize) {
+    for (
+      var offset = 0;
+      offset <= samples.length - _frameSize;
+      offset += _hopSize
+    ) {
       final frame = samples.sublist(offset, offset + _frameSize);
       var rms = 0.0;
       for (final value in frame) {
@@ -136,7 +144,9 @@ class PitchService {
         await decodeWavToFloatBuffer(filePath),
       );
       if (detectedFrequency == null) {
-        report.writeln("No valid pitch detected. Check if audio is too quiet or noisy.");
+        report.writeln(
+          "No valid pitch detected. Check if audio is too quiet or noisy.",
+        );
         return report.toString();
       }
 
@@ -145,11 +155,15 @@ class PitchService {
       final status = centsDiff > errorCents
           ? "Too Sharp (High)"
           : centsDiff < -errorCents
-              ? "Too Flat (Low)"
-              : "Accurate";
+          ? "Too Flat (Low)"
+          : "Accurate";
 
-      report.writeln("Detected Frequency: ${detectedFrequency.toStringAsFixed(2)} Hz");
-      report.writeln("Difference: ${centsDiff > 0 ? '+' : ''}${centsDiff.toStringAsFixed(1)} cents\n");
+      report.writeln(
+        "Detected Frequency: ${detectedFrequency.toStringAsFixed(2)} Hz",
+      );
+      report.writeln(
+        "Difference: ${centsDiff > 0 ? '+' : ''}${centsDiff.toStringAsFixed(1)} cents\n",
+      );
       report.writeln("Result: $status");
     } on PitchAnalysisException catch (error) {
       report.writeln(error.message);
@@ -162,15 +176,22 @@ class PitchService {
     try {
       final noteEvents = await _fetchNoteEvents(filePath);
       noteEvents.sort((a, b) => a.startTime.compareTo(b.startTime));
-
-      if (noteEvents.length != _aMajorMidi.length) {
-        return '检测到 ${noteEvents.length} 个音符，期望 8 个。可能存在漏拉、多拉或分割错误，本次暂不生成音准报告。';
-      }
-
       final floatBuffer = await decodeWavToFloatBuffer(filePath);
+      final canScoreScale = noteEvents.length == _aMajorMidi.length;
       final report = StringBuffer()
-        ..writeln('--- A Major Scale Pitch Analysis ---')
-        ..writeln('Basic Pitch 已识别 8 个音符，以下为 YIN 音准分析：\n');
+        ..writeln('--- Basic Pitch Segment Analysis ---')
+        ..writeln('Basic Pitch detected ${noteEvents.length} notes.');
+
+      if (canScoreScale) {
+        report.writeln(
+          'Note count matches. Scoring the ascending A major scale with YIN.\n',
+        );
+      } else {
+        report.writeln(
+          'Expected 8 notes, so full A major scoring is unavailable. '
+          'Showing each detected segment.\n',
+        );
+      }
 
       for (var index = 0; index < noteEvents.length; index++) {
         final event = noteEvents[index];
@@ -182,16 +203,17 @@ class PitchService {
             .ceil()
             .clamp(0, floatBuffer.length)
             .toInt();
-        final targetMidi = _aMajorMidi[index];
-        final targetFrequency = 440.0 * pow(2, (targetMidi - 69) / 12);
 
         report.writeln(
-          '${index + 1}. ${_aMajorNames[index]} '
+          '${index + 1}. Basic Pitch: ${_midiToNoteName(event.pitchMidi)} '
           '(${event.startTime.toStringAsFixed(2)}-${event.endTime.toStringAsFixed(2)} s)',
         );
+        report.writeln('   Confidence: ${event.amplitude.toStringAsFixed(2)}');
+        report.writeln('   pYIN: ${_formatFrequency(event.pyinFreq)}');
+        report.writeln('   CREPE: ${_formatFrequency(event.crepeFreq)}');
 
         if (endSample <= startSample || endSample - startSample < _frameSize) {
-          report.writeln('   状态: insufficient_samples（片段过短，无法检测）\n');
+          report.writeln('   YIN: unavailable (segment is too short).\n');
           continue;
         }
 
@@ -199,41 +221,55 @@ class PitchService {
           floatBuffer.sublist(startSample, endSample),
         );
         if (detectedFrequency == null) {
-          report.writeln('   状态: no_pitch_detected（没有检测到稳定音高）\n');
+          report.writeln('   YIN: unavailable (no stable pitch detected).\n');
           continue;
         }
 
+        report.writeln('   YIN: ${_formatFrequency(detectedFrequency)}');
+
+        if (!canScoreScale) {
+          report.writeln('   Full-scale scoring unavailable.\n');
+          continue;
+        }
+
+        final targetMidi = _aMajorMidi[index];
+        final targetFrequency = 440.0 * pow(2, (targetMidi - 69) / 12);
         final centsDeviation =
             1200 * (log(detectedFrequency / targetFrequency) / ln2);
         final status = centsDeviation.abs() <= errorCents
-            ? 'Accurate'
+            ? '✅ Accurate'
             : centsDeviation > 0
-                ? 'Too Sharp'
-                : 'Too Flat';
-        report.writeln('   检测频率: ${detectedFrequency.toStringAsFixed(2)} Hz');
-        report.writeln('   音分偏差: ${centsDeviation.toStringAsFixed(1)} cents');
-        report.writeln('   状态: ok ($status)\n');
+            ? '↗️ Too Sharp'
+            : '↘️ Too Flat';
+        report.writeln(
+          '   Target: ${_aMajorNames[index]} '
+          '(${targetFrequency.toStringAsFixed(2)} Hz)',
+        );
+        report.writeln(
+          '   Deviation: ${centsDeviation.toStringAsFixed(1)} cents',
+        );
+        report.writeln('   Status: $status\n');
       }
 
       return report.toString();
     } on TimeoutException catch (error, stackTrace) {
       _logAnalysisError(error, stackTrace);
-      return '音频分析请求超时，请确认后端服务正在运行后重试。';
+      return 'Audio analysis timed out. Confirm the backend service is running and try again.';
     } on SocketException catch (error, stackTrace) {
       _logAnalysisError(error, stackTrace);
-      return '无法连接音频分析服务，请确认后端已启动并可通过 10.0.2.2:8000 访问。';
+      return 'Unable to connect to the audio analysis service. Confirm the backend is running.';
     } on http.ClientException catch (error, stackTrace) {
       _logAnalysisError(error, stackTrace);
-      return '音频分析网络错误：${error.message}';
+      return 'Audio analysis network error: ${error.message}';
     } on PitchAnalysisException catch (error, stackTrace) {
       _logAnalysisError(error, stackTrace);
-      return error.message;
+      return 'The audio analysis service could not process this recording.';
     } on FormatException catch (error, stackTrace) {
       _logAnalysisError(error, stackTrace);
-      return '音频分析服务返回了无法识别的数据。';
+      return 'The audio analysis service returned unrecognized data.';
     } catch (error, stackTrace) {
       _logAnalysisError(error, stackTrace);
-      return '音频分析失败：$error (${error.runtimeType})';
+      return 'Audio analysis failed: $error (${error.runtimeType})';
     }
   }
 
@@ -241,6 +277,31 @@ class PitchService {
     print('音频分析失败，异常详情: $error');
     print('异常类型: ${error.runtimeType}');
     print('堆栈信息: $stackTrace');
+  }
+
+  String _midiToNoteName(int midi) {
+    const noteNames = [
+      'C',
+      'C#',
+      'D',
+      'D#',
+      'E',
+      'F',
+      'F#',
+      'G',
+      'G#',
+      'A',
+      'A#',
+      'B',
+    ];
+    return '${noteNames[midi % 12]}${(midi ~/ 12) - 1}';
+  }
+
+  String _formatFrequency(double? frequency) {
+    if (frequency == null || frequency <= 0) {
+      return 'unavailable';
+    }
+    return '${frequency.toStringAsFixed(2)} Hz';
   }
 
   Future<List<_NoteEvent>> _fetchNoteEvents(String filePath) async {
@@ -261,7 +322,10 @@ class PitchService {
 
     if (response.statusCode != 200) {
       final detail = decoded is Map<String, dynamic> ? decoded['detail'] : null;
-      throw PitchAnalysisException(detail?.toString() ?? '服务返回 HTTP ${response.statusCode}。');
+      throw PitchAnalysisException(
+        detail?.toString() ??
+            'The service returned HTTP ${response.statusCode}.',
+      );
     }
 
     if (decoded is! Map<String, dynamic> || decoded['note_events'] is! List) {
@@ -275,16 +339,31 @@ class PitchService {
       return _NoteEvent(
         startTime: (value['start_time'] as num).toDouble(),
         endTime: (value['end_time'] as num).toDouble(),
+        pitchMidi: (value['pitch_midi'] as num).round(),
+        amplitude: (value['amplitude'] as num).toDouble(),
+        pyinFreq: (value['pyin_freq'] as num?)?.toDouble(),
+        crepeFreq: (value['crepe_freq'] as num?)?.toDouble(),
       );
     }).toList();
   }
 }
 
 class _NoteEvent {
-  const _NoteEvent({required this.startTime, required this.endTime});
+  const _NoteEvent({
+    required this.startTime,
+    required this.endTime,
+    required this.pitchMidi,
+    required this.amplitude,
+    required this.pyinFreq,
+    required this.crepeFreq,
+  });
 
   final double startTime;
   final double endTime;
+  final int pitchMidi;
+  final double amplitude;
+  final double? pyinFreq;
+  final double? crepeFreq;
 }
 
 class PitchAnalysisException implements Exception {
