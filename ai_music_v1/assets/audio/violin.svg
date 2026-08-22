@@ -1,0 +1,19 @@
+<svg width="200" height="400" xmlns="http://www.w3.org/2000/svg">
+  <!-- 小提琴主体 -->
+  <ellipse cx="100" cy="200" rx="60" ry="150" fill="saddlebrown" stroke="black" stroke-width="2"/>
+  
+  <!-- 琴颈 -->
+  <rect x="90" y="50" width="20" height="100" fill="sienna" stroke="black"/>
+  
+  <!-- 琴弦 -->
+  <line x1="100" y1="50" x2="100" y2="350" stroke="black" stroke-width="2"/>
+  <line x1="95" y1="50" x2="95" y2="350" stroke="black" stroke-width="1"/>
+  <line x1="105" y1="50" x2="105" y2="350" stroke="black" stroke-width="1"/>
+  
+  <!-- 手指示意（圆点） -->
+  <circle cx="100" cy="120" r="8" fill="red"/>
+  <circle cx="95" cy="140" r="8" fill="red"/>
+  
+  <!-- 弓的示意 -->
+  <line x1="40" y1="100" x2="160" y2="110" stroke="blue" stroke-width="4"/>
+</svg>

@@ -1,27 +1,83 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:developer' as developer;
 import 'dart:io';
 import 'dart:math';
 import 'dart:typed_data';
 import 'package:http/http.dart' as http;
 import '../utils/yin.dart';
 
+class SegmentedAnalysisResult {
+  const SegmentedAnalysisResult({
+    required this.report,
+    required this.detections,
+    required this.averageCentsDeviation,
+    required this.practiceTargetNames,
+  });
+
+  final String report;
+  final List<NoteDetectionResult> detections;
+  final double? averageCentsDeviation;
+  final List<String> practiceTargetNames;
+}
+
+class PracticeTarget {
+  const PracticeTarget({
+    required this.noteName,
+    required this.midi,
+    required this.frequency,
+  });
+
+  final String noteName;
+  final int midi;
+  final double frequency;
+}
+
+class NoteDetectionResult {
+  const NoteDetectionResult({
+    required this.index,
+    required this.startTime,
+    required this.endTime,
+    required this.basicPitchMidi,
+    required this.basicPitchNoteName,
+    required this.amplitude,
+    required this.pyinFrequency,
+    required this.crepeFrequency,
+    required this.yinFrequency,
+    required this.targetNoteName,
+    required this.targetFrequency,
+    required this.centsDeviation,
+    required this.status,
+    required this.unavailableReason,
+  });
+
+  final int index;
+  final double startTime;
+  final double endTime;
+  final int basicPitchMidi;
+  final String basicPitchNoteName;
+  final double amplitude;
+  final double? pyinFrequency;
+  final double? crepeFrequency;
+  final double? yinFrequency;
+  final String? targetNoteName;
+  final double? targetFrequency;
+  final double? centsDeviation;
+  final String? status;
+  final String? unavailableReason;
+}
+
 class PitchService {
-  static const String _analysisEndpoint = 'http://192.168.2.198:8000/analyze';
+  static const String _analysisEndpoint = 'http://3.107.222.157:8000/analyze';
+  static const String _feedbackEndpoint = 'http://3.107.222.157:8000/feedback';
+  // static const String _ollamaEndpoint =
+  //     'http://192.168.2.115:11434/api/generate';
+  //static const String _ollamaModel = 'gemma4:e2b-it-qat';
   static const int _frameSize = 2048;
   static const int _hopSize = 512;
-  static const Duration _requestTimeout = Duration(seconds: 60);
+  static const Duration _requestTimeout = Duration(seconds: 300);
+  static const Duration _feedbackRequestTimeout = Duration(seconds: 300);
   static const List<int> _aMajorMidi = [69, 71, 73, 74, 76, 78, 80, 81];
-  static const List<String> _aMajorNames = [
-    'A4',
-    'B4',
-    'C#5',
-    'D5',
-    'E5',
-    'F#5',
-    'G#5',
-    'A5',
-  ];
 
   final int sampleRate = 44100;
 
@@ -172,24 +228,141 @@ class PitchService {
     return report.toString();
   }
 
-  Future<String> analyzeAudioFileWithSegmentation(String filePath) async {
+  String buildFeedbackPrompt(SegmentedAnalysisResult result) {
+    final isTargetedPractice = result.practiceTargetNames.isNotEmpty;
+    final buffer = StringBuffer()
+      ..writeln('你是一位耐心、鼓励7至9岁孩子的小提琴老师。')
+      ..writeln(
+        isTargetedPractice
+            ? '学生刚刚在一把位针对练习了：${result.practiceTargetNames.join('、')}。'
+            : '学生刚刚在一把位拉了一遍A大调音阶。',
+      )
+      ..writeln('A大调音阶（一把位）的标准指法是：')
+      ..writeln(
+        'A4=A弦空弦, B4=A弦1指, C#5=A弦2指, D5=A弦3指, '
+        'E5=E弦空弦, F#5=E弦1指, G#5=E弦2指, A5=E弦3指',
+      )
+      ..writeln()
+      ..writeln('以下是每个音符的检测结果：');
+
+    for (final note in result.detections) {
+      if (note.centsDeviation == null) {
+        buffer.writeln(
+          '第${note.index}个音(${note.basicPitchNoteName}): '
+          '${note.unavailableReason ?? '未能评分'}',
+        );
+        continue;
+      }
+
+      final status = switch (note.status) {
+        'accurate' => '音准准确',
+        'tooSharp' => '偏高${note.centsDeviation!.toStringAsFixed(1)}音分',
+        'tooFlat' => '偏低${note.centsDeviation!.abs().toStringAsFixed(1)}音分',
+        _ => '未能评分',
+      };
+      buffer.writeln('第${note.index}个音(${note.basicPitchNoteName}): $status');
+    }
+
+    buffer
+      ..writeln('\n请你用中文，以鼓励为主的语气，给学生一段简短的反馈（150字以内）。')
+      ..writeln('要求：')
+      ..writeln('1.先肯定孩子已经做得好的地方，再选1到2个最需要关注的重点说。')
+      ..writeln('2.只依据上面的检测结果说话；不能从音高数据判断、猜测或纠正手型、手指位置、握弓、姿势或身体问题。')
+      ..writeln(
+        '3.建议要简单、具体、能马上做，例如“把这个音慢慢拉3次，每次拉长一点，听听声音有没有更稳”“先听老师或调音器示范，再模仿一次”。不要使用“手指往前/往后”“放松手型”等技术动作。',
+      )
+      ..writeln('4.使用7至9岁孩子和家长都能听懂的短句和日常用语；不使用专业术语、音分、频率或复杂解释。')
+      ..writeln(
+        '5.如果检测不稳定、音符数量不对或无法评分，温和地说明“这次声音没有被清楚听出来”，建议在安静处把音拉长一点再试；不要责备孩子。',
+      )
+      ..writeln(
+        '6.如果检测结果显示某一个音明显比其他音更需要练习，可以在最后建议孩子下次在页面上只选这个音，做一次“单音针对练习”。一次只推荐一个音，并说明“慢慢拉3次、每次拉长一点，听听声音有没有更稳”。',
+      )
+      ..writeln('7.语气积极自然，不要逐条罗列每个音符，不要给出医学、伤痛或纠正姿势的建议。')
+      ..writeln(
+        '8.仅当这是完整的8个音A大调音阶、这4个音都已评分，且前4个音(A4、B4、C#5、D5)全部偏高或全部偏低时，可以说“这4个音都朝同一个方向偏了一点，A弦本身有可能需要校音。请先请家长用调音器检查并校准A弦，再试一次。”；后4个音(E5、F#5、G#5、A5)全部偏高或全部偏低时，同样提示E弦有可能需要校音。必须使用“有可能”，不能把它说成确定原因；不满足上述全部条件时，不要建议校弦。',
+      );
+    return buffer.toString();
+  }
+
+  Future<String?> generateFeedback(SegmentedAnalysisResult result) async {
+    if (result.detections.isEmpty) {
+      return null;
+    }
+
     try {
+      final response = await http
+          .post(
+            Uri.parse(_feedbackEndpoint),
+            headers: const {'Content-Type': 'application/json'},
+            body: jsonEncode({'prompt': buildFeedbackPrompt(result)}),
+          )
+          .timeout(_feedbackRequestTimeout);
+      if (response.statusCode != 200) {
+        developer.log(
+          'Ollama feedback request failed: HTTP ${response.statusCode}',
+          name: 'PitchService',
+        );
+        return null;
+      }
+
+      final decoded = jsonDecode(response.body);
+      if (decoded is! Map<String, dynamic>) {
+        developer.log(
+          'Ollama feedback response was not a JSON object.',
+          name: 'PitchService',
+        );
+        return null;
+      }
+
+      final feedback = decoded['response'];
+      return feedback is String && feedback.trim().isNotEmpty
+          ? feedback.trim()
+          : null;
+    } catch (error, stackTrace) {
+      developer.log(
+        '生成AI反馈失败',
+        name: 'PitchService',
+        error: error,
+        stackTrace: stackTrace,
+      );
+      return null;
+    }
+  }
+
+  Future<SegmentedAnalysisResult> analyzeAudioFileWithSegmentation(
+    String filePath, {
+    List<PracticeTarget> practiceTargets = const [],
+  }) async {
+    try {
+      if (practiceTargets.length > 2) {
+        throw const PitchAnalysisException(
+          'Targeted practice supports up to two notes.',
+        );
+      }
       final noteEvents = await _fetchNoteEvents(filePath);
       noteEvents.sort((a, b) => a.startTime.compareTo(b.startTime));
       final floatBuffer = await decodeWavToFloatBuffer(filePath);
-      final canScoreScale = noteEvents.length == _aMajorMidi.length;
+      final isTargetedPractice = practiceTargets.isNotEmpty;
+      final isCompleteScale =
+          !isTargetedPractice && noteEvents.length == _aMajorMidi.length;
+      final detections = <NoteDetectionResult>[];
       final report = StringBuffer()
         ..writeln('--- Basic Pitch Segment Analysis ---')
         ..writeln('Basic Pitch detected ${noteEvents.length} notes.');
 
-      if (canScoreScale) {
+      if (isTargetedPractice) {
         report.writeln(
-          'Note count matches. Scoring the ascending A major scale with YIN.\n',
+          'Targeted practice: matching each segment to the closest selected note '
+          '(${practiceTargets.map((target) => target.noteName).join(', ')}).\n',
         );
+      } else if (isCompleteScale) {
+        report.writeln('已识别完整的 8 个音，按 A 大调音阶顺序评分。\n');
       } else {
         report.writeln(
-          'Expected 8 notes, so full A major scoring is unavailable. '
-          'Showing each detected segment.\n',
+          '本次识别到 ${noteEvents.length} 个音，未构成完整的 8 音 A 大调音阶。'
+          '已根据每段识别到的音高，展示可评分的部分结果；'
+          '未识别到的音不会计入本次评分。\n',
         );
       }
 
@@ -212,65 +385,173 @@ class PitchService {
         report.writeln('   pYIN: ${_formatFrequency(event.pyinFreq)}');
         report.writeln('   CREPE: ${_formatFrequency(event.crepeFreq)}');
 
+        final scaleTargetMidi = isTargetedPractice
+            ? null
+            : isCompleteScale
+            ? _aMajorMidi[index]
+            : _findClosestScaleTargetMidi(event.pitchMidi);
+        double? targetFrequency = scaleTargetMidi == null
+            ? null
+            : 440.0 * pow(2, (scaleTargetMidi - 69) / 12);
+        String? targetNoteName = scaleTargetMidi == null
+            ? null
+            : _midiToNoteName(scaleTargetMidi);
+        double? detectedFrequency;
+        String? unavailableReason;
+
         if (endSample <= startSample || endSample - startSample < _frameSize) {
           report.writeln('   YIN: unavailable (segment is too short).\n');
-          continue;
+          unavailableReason = 'Segment is too short for YIN analysis.';
+        } else {
+          detectedFrequency = detectPitchFromSamples(
+            floatBuffer.sublist(startSample, endSample),
+          );
+          if (detectedFrequency == null) {
+            report.writeln('   YIN: unavailable (no stable pitch detected).\n');
+            unavailableReason = 'No stable YIN pitch detected.';
+          } else {
+            report.writeln('   YIN: ${_formatFrequency(detectedFrequency)}');
+          }
         }
 
-        final detectedFrequency = detectPitchFromSamples(
-          floatBuffer.sublist(startSample, endSample),
-        );
-        if (detectedFrequency == null) {
-          report.writeln('   YIN: unavailable (no stable pitch detected).\n');
-          continue;
+        double? centsDeviation;
+        String? status;
+        if (isTargetedPractice && detectedFrequency != null) {
+          final closestTarget = _findClosestPracticeTarget(
+            detectedFrequency,
+            practiceTargets,
+          );
+          targetFrequency = closestTarget.frequency;
+          targetNoteName = closestTarget.noteName;
         }
 
-        report.writeln('   YIN: ${_formatFrequency(detectedFrequency)}');
-
-        if (!canScoreScale) {
-          report.writeln('   Full-scale scoring unavailable.\n');
-          continue;
+        if ((scaleTargetMidi != null || isTargetedPractice) &&
+            detectedFrequency != null &&
+            targetFrequency != null) {
+          centsDeviation =
+              1200 * (log(detectedFrequency / targetFrequency) / ln2);
+          status = centsDeviation.abs() <= errorCents
+              ? 'accurate'
+              : centsDeviation > 0
+              ? 'tooSharp'
+              : 'tooFlat';
+          report.writeln(
+            '   Target: $targetNoteName '
+            '(${targetFrequency.toStringAsFixed(2)} Hz)',
+          );
+          report.writeln(
+            '   Deviation: ${centsDeviation.toStringAsFixed(1)} cents',
+          );
+          report.writeln(
+            '   Status: ${status == 'accurate'
+                ? '✅ Accurate'
+                : status == 'tooSharp'
+                ? '↗️ Too Sharp'
+                : '↘️ Too Flat'}\n',
+          );
+        } else if (!isTargetedPractice && scaleTargetMidi == null) {
+          report.writeln('   此段未匹配到 A 大调音阶中的目标音，暂不评分。\n');
         }
 
-        final targetMidi = _aMajorMidi[index];
-        final targetFrequency = 440.0 * pow(2, (targetMidi - 69) / 12);
-        final centsDeviation =
-            1200 * (log(detectedFrequency / targetFrequency) / ln2);
-        final status = centsDeviation.abs() <= errorCents
-            ? '✅ Accurate'
-            : centsDeviation > 0
-            ? '↗️ Too Sharp'
-            : '↘️ Too Flat';
-        report.writeln(
-          '   Target: ${_aMajorNames[index]} '
-          '(${targetFrequency.toStringAsFixed(2)} Hz)',
+        detections.add(
+          NoteDetectionResult(
+            index: index + 1,
+            startTime: event.startTime,
+            endTime: event.endTime,
+            basicPitchMidi: event.pitchMidi,
+            basicPitchNoteName: _midiToNoteName(event.pitchMidi),
+            amplitude: event.amplitude,
+            pyinFrequency: event.pyinFreq,
+            crepeFrequency: event.crepeFreq,
+            yinFrequency: detectedFrequency,
+            targetNoteName: targetNoteName,
+            targetFrequency: targetFrequency,
+            centsDeviation: centsDeviation,
+            status: status,
+            unavailableReason: unavailableReason,
+          ),
         );
-        report.writeln(
-          '   Deviation: ${centsDeviation.toStringAsFixed(1)} cents',
-        );
-        report.writeln('   Status: $status\n');
       }
 
-      return report.toString();
+      final scoredDetections = detections
+          .where((detection) => detection.centsDeviation != null)
+          .toList();
+      final averageCentsDeviation = scoredDetections.isEmpty
+          ? null
+          : scoredDetections
+                    .map((detection) => detection.centsDeviation!)
+                    .reduce((sum, deviation) => sum + deviation) /
+                scoredDetections.length;
+      return SegmentedAnalysisResult(
+        report: report.toString(),
+        detections: detections,
+        averageCentsDeviation: averageCentsDeviation,
+        practiceTargetNames: practiceTargets
+            .map((target) => target.noteName)
+            .toList(growable: false),
+      );
     } on TimeoutException catch (error, stackTrace) {
       _logAnalysisError(error, stackTrace);
-      return 'Audio analysis timed out. Confirm the backend service is running and try again.';
+      return _failedSegmentedAnalysis(
+        'Audio analysis timed out. Confirm the backend service is running and try again.',
+      );
     } on SocketException catch (error, stackTrace) {
       _logAnalysisError(error, stackTrace);
-      return 'Unable to connect to the audio analysis service. Confirm the backend is running.';
+      return _failedSegmentedAnalysis(
+        'Unable to connect to the audio analysis service. Confirm the backend is running.',
+      );
     } on http.ClientException catch (error, stackTrace) {
       _logAnalysisError(error, stackTrace);
-      return 'Audio analysis network error: ${error.message}';
+      return _failedSegmentedAnalysis(
+        'Audio analysis network error: ${error.message}',
+      );
     } on PitchAnalysisException catch (error, stackTrace) {
       _logAnalysisError(error, stackTrace);
-      return 'The audio analysis service could not process this recording.';
+      return _failedSegmentedAnalysis(
+        'The audio analysis service could not process this recording.',
+      );
     } on FormatException catch (error, stackTrace) {
       _logAnalysisError(error, stackTrace);
-      return 'The audio analysis service returned unrecognized data.';
+      return _failedSegmentedAnalysis(
+        'The audio analysis service returned unrecognized data.',
+      );
     } catch (error, stackTrace) {
       _logAnalysisError(error, stackTrace);
-      return 'Audio analysis failed: $error (${error.runtimeType})';
+      return _failedSegmentedAnalysis(
+        'Audio analysis failed: $error (${error.runtimeType})',
+      );
     }
+  }
+
+  SegmentedAnalysisResult _failedSegmentedAnalysis(String report) {
+    return SegmentedAnalysisResult(
+      report: report,
+      detections: const [],
+      averageCentsDeviation: null,
+      practiceTargetNames: const [],
+    );
+  }
+
+  PracticeTarget _findClosestPracticeTarget(
+    double detectedFrequency,
+    List<PracticeTarget> practiceTargets,
+  ) {
+    return practiceTargets.reduce((closest, candidate) {
+      final closestDeviation =
+          (1200 * (log(detectedFrequency / closest.frequency) / ln2)).abs();
+      final candidateDeviation =
+          (1200 * (log(detectedFrequency / candidate.frequency) / ln2)).abs();
+      return candidateDeviation < closestDeviation ? candidate : closest;
+    });
+  }
+
+  int? _findClosestScaleTargetMidi(int detectedMidi) {
+    final closestMidi = _aMajorMidi.reduce((closest, candidate) {
+      return (candidate - detectedMidi).abs() < (closest - detectedMidi).abs()
+          ? candidate
+          : closest;
+    });
+    return (closestMidi - detectedMidi).abs() <= 1 ? closestMidi : null;
   }
 
   void _logAnalysisError(Object error, StackTrace stackTrace) {
